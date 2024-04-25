@@ -1,6 +1,7 @@
 ﻿using DSharpPlus;
 using DSharpPlus.Entities;
 using DSharpPlus.EventArgs;
+using DSharpPlus.SlashCommands;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Lavalink4NET.Extensions;
@@ -34,7 +35,7 @@ builder.Services.ConfigureLavalink(config =>
 
 
 // Logging
-builder.Services.AddLogging(s => s.AddConsole().SetMinimumLevel(LogLevel.Trace));
+builder.Services.AddLogging(s => s.AddConsole().SetMinimumLevel(LogLevel.Debug));
 
 builder.Build().Run();
 
@@ -53,6 +54,8 @@ file sealed class ApplicationHost : BackgroundService
 		_discordClient = discordClient;
 		_audioService = audioService;
 		_jsonManager = new JSONManager();
+		var slash = _discordClient.UseSlashCommands();
+		slash.RegisterCommands<SlashCommands>();
 	}
 
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -145,13 +148,6 @@ file sealed class ApplicationHost : BackgroundService
 	/// <returns></returns>
 	private async Task OnMessageCreated(DiscordClient senderClient, MessageCreateEventArgs args)
 	{
-		if (args.Author.IsBot)
-		{
-			if (!args.Author.IsCurrent)
-				await args.Message.DeleteAsync();
-
-			return;
-		}
 
 		DiscordMember sender = args.Message.Author as DiscordMember;
 
@@ -178,7 +174,15 @@ file sealed class ApplicationHost : BackgroundService
 			return;
 		}
 
-		bool isCommand = await CheckIsCommand(sender, sender.Guild.Id, args);
+        if (args.Author.IsBot)
+        {
+            if (!args.Author.IsCurrent)
+                await args.Message.DeleteAsync();
+
+            return;
+        }
+
+        bool isCommand = await CheckIsCommand(sender, sender.Guild.Id, args);
 
 		if (isCommand)  // Check if message is a command and execute it.
 		{
@@ -211,6 +215,13 @@ file sealed class ApplicationHost : BackgroundService
 			await args.Message.DeleteAsync();
 			return;
 		}
+
+		if(track.Uri.ToString() == "https://www.youtube.com/watch?v=mQfkFxUQKD8")
+		{
+            await sender.SendMessageAsync("Error 3: Du kleiner goh");
+            await args.Message.DeleteAsync();
+            return;
+        }
 
 		if (guildInfo.TTSEnabled)  // Don't have TTS Plugin yet
 		{
@@ -285,7 +296,9 @@ file sealed class ApplicationHost : BackgroundService
 		string[] cmd = command.ToLower().Split(separator: new char[] { ' ' }, count: 2);
 
 		if (cmd.Length != 2)
-			return;
+		{
+			cmd = new string[] { cmd[0], "" };
+		}
 
 		string mainCommand = cmd[0];
 		string parameters = cmd[1];
