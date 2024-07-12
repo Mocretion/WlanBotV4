@@ -12,7 +12,7 @@
     <PackageReference Include="DSharpPlus.Interactivity" Version="4.4.6" />
     <PackageReference Include="DSharpPlus.SlashCommands" Version="4.4.6" />
     <PackageReference Include="Emzi0767.Common" Version="2.6.6" />
-    <PackageReference Include="Lavalink4NET.DSharpPlus" Version="4.0.13" />
+    <PackageReference Include="Lavalink4NET.DSharpPlus" Version="4.0.18" />
     <PackageReference Include="Lavalink4NET.Integrations.TextToSpeech" Version="4.0.13" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
