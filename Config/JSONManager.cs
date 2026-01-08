@@ -1,50 +1,97 @@
-﻿using Newtonsoft.Json;
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Text;
-using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
+using System.Text.Json;
 
 public class JSONManager
 {
-	public List<ServerInformation> Servers;
+	private readonly ConcurrentDictionary<ulong, ServerInformation> _servers = new();
+	private readonly SemaphoreSlim _fileLock = new(1, 1);
+	private readonly ILogger<JSONManager> _logger;
+	private const string ConfigPath = "servers.json";
 
-	public JSONManager() { Servers = new List<ServerInformation>(); }
+	public IEnumerable<ServerInformation> Servers => _servers.Values;
 
-	public async Task ReadJSON()
+	public JSONManager(ILogger<JSONManager> logger)
 	{
-		// PLEASE NOTE that you have to copy your "config.json" file (with your token & prefix) over to
-		// the /bin/Debug folder of your solution, else this won't work
+		_logger = logger;
+	}
 
-		using (StreamReader sr = new StreamReader("servers.json", new UTF8Encoding(false)))
+	public async Task LoadAsync()
+	{
+		await _fileLock.WaitAsync();
+		try
 		{
-			string json = await sr.ReadToEndAsync(); //Reading whole file
-			List<ServerInformation> jsonServers = JsonConvert.DeserializeObject<List<ServerInformation>>(json); //Deserialising file into the ServerInformation structure
+			if (!File.Exists(ConfigPath))
+			{
+				_logger.LogWarning("servers.json not found, creating empty config");
+				await File.WriteAllTextAsync(ConfigPath, "[]");
+				return;
+			}
 
-			if (jsonServers != null)
-				Servers = jsonServers;
+			string json = await File.ReadAllTextAsync(ConfigPath);
+			var servers = JsonSerializer.Deserialize<List<ServerInformation>>(json);
+
+			if (servers != null)
+			{
+				_servers.Clear();
+				foreach (var server in servers)
+				{
+					_servers[server.Id] = server;
+				}
+			}
+
+			_logger.LogInformation("Loaded {Count} server configurations", _servers.Count);
+		}
+		catch (Exception ex)
+		{
+			_logger.LogError(ex, "Failed to load servers.json");
+		}
+		finally
+		{
+			_fileLock.Release();
 		}
 	}
 
-	public async Task UpdateServerList()
+	public async Task SaveAsync()
 	{
-		string jsonString = JsonConvert.SerializeObject(Servers);
-
-		using (StreamWriter outputFile = new StreamWriter("servers.json"))
+		await _fileLock.WaitAsync();
+		try
 		{
-			await outputFile.WriteAsync(jsonString);
+			var options = new JsonSerializerOptions { WriteIndented = true };
+			string json = JsonSerializer.Serialize(_servers.Values.ToList(), options);
+			await File.WriteAllTextAsync(ConfigPath, json);
+		}
+		catch (Exception ex)
+		{
+			_logger.LogError(ex, "Failed to save servers.json");
+		}
+		finally
+		{
+			_fileLock.Release();
 		}
 	}
 
-	public ServerInformation ServerExists(string serverId)
+	public ServerInformation? GetServer(ulong serverId)
 	{
-		foreach (ServerInformation server in Servers)
-		{
-			if (server.Id == serverId)
-				return server;
-		}
+		_servers.TryGetValue(serverId, out var server);
+		return server;
+	}
 
-		return null;
+	public ServerInformation GetOrCreateServer(ulong serverId, ulong channelId)
+	{
+		return _servers.AddOrUpdate(
+			serverId,
+			_ => new ServerInformation { Id = serverId, MusicChannelId = channelId },
+			(_, existing) =>
+			{
+				existing.MusicChannelId = channelId;
+				return existing;
+			});
+	}
+
+	public void UpdateServer(ServerInformation server)
+	{
+		_servers[server.Id] = server;
 	}
 }
 

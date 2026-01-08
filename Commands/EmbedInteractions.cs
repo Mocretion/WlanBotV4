@@ -1,14 +1,7 @@
-﻿using DSharpPlus.EventArgs;
+using DSharpPlus.EventArgs;
 using Lavalink4NET.Players.Queued;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Numerics;
-using System.Text;
-using System.Threading.Tasks;
 
-
-public class EmbedInteractions
+public static class EmbedInteractions
 {
 	public static async Task HandleButtonAsync(string buttonId, CustomQueuedPlayer player, ComponentInteractionCreateEventArgs args)
 	{
@@ -18,10 +11,10 @@ public class EmbedInteractions
 				await player.Queue.ClearAsync();
 				player.RepeatMode = TrackRepeatMode.None;
 				await player.StopAsync();
-				player.UpdateEmbed(args.Channel);
+				await player.UpdateEmbedAsync(args.Channel);
 				break;
-			case "1":  // Skip
 
+			case "1":  // Skip
 				if (player.Queue.Count == 0)
 				{
 					await player.StopAsync();
@@ -30,12 +23,14 @@ public class EmbedInteractions
 				{
 					await player.SkipAsync();
 				}
-				player.UpdateEmbed(args.Channel);
+				await player.UpdateEmbedAsync(args.Channel);
 				break;
-			case "2":  // Pause
 
+			case "2":  // Pause
 				if (player.CurrentTrack == null)
+				{
 					return;
+				}
 
 				if (player.IsPaused)
 				{
@@ -45,21 +40,21 @@ public class EmbedInteractions
 				{
 					await player.PauseAsync();
 				}
-				player.UpdateEmbed(args.Channel);
+				await player.UpdateEmbedAsync(args.Channel);
 				break;
+
 			case "3":  // Loop
-				if (player.RepeatMode == TrackRepeatMode.None)
-				{
-					player.RepeatMode = TrackRepeatMode.Track;
-				}
-				else
-				{
-					player.RepeatMode = TrackRepeatMode.None;
-				}
-				player.UpdateEmbed(args.Channel);
+				player.RepeatMode = player.RepeatMode == TrackRepeatMode.None
+					? TrackRepeatMode.Track
+					: TrackRepeatMode.None;
+				await player.UpdateEmbedAsync(args.Channel);
+				break;
+
+			case "4":  // Join
+				// Bot joins the user's voice channel via GetPlayerAsync in OnButtonReactionAsync
+				await player.UpdateEmbedAsync(args.Channel);
 				break;
 		}
 	}
-
 }
 

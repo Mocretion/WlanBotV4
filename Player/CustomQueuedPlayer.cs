@@ -4,85 +4,112 @@ using Lavalink4NET.Extensions;
 using Lavalink4NET.Players;
 using Lavalink4NET.Players.Queued;
 using Lavalink4NET.Protocol.Payloads.Events;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 
 public sealed class CustomQueuedPlayer : QueuedLavalinkPlayer
 {
-	private JSONManager _jsonManager;
-	private DiscordClient _discordClient;
+	private readonly JSONManager _jsonManager;
+	private readonly DiscordClient _discordClient;
+	private readonly ILogger<CustomQueuedPlayer> _logger;
 
-	public CustomQueuedPlayer(IPlayerProperties<QueuedLavalinkPlayer, QueuedLavalinkPlayerOptions> properties, DiscordClient discordClient, JSONManager jsonManager) : base(properties)
+	public CustomQueuedPlayer(IPlayerProperties<QueuedLavalinkPlayer, QueuedLavalinkPlayerOptions> properties, DiscordClient discordClient, JSONManager jsonManager, ILogger<CustomQueuedPlayer> logger) : base(properties)
 	{
 		_jsonManager = jsonManager;
 		_discordClient = discordClient;
+		_logger = logger;
 	}
 
 	protected override async ValueTask NotifyTrackEndedAsync(ITrackQueueItem queueItem, TrackEndReason endReason, CancellationToken cancellationToken = default)
 	{
+		try
+		{
+			await base.NotifyTrackEndedAsync(queueItem, endReason, cancellationToken);
 
-		if(Queue.Count == 0)
-		{
-			await base.NotifyTrackEndedAsync(queueItem, endReason, cancellationToken);
-			var information = _jsonManager.ServerExists(this.GuildId.ToString());
-			var textChannel = await _discordClient.GetChannelAsync(ulong.Parse(information.MusicChannelId));
-			UpdateEmbed(textChannel);
+			if (Queue.Count == 0)
+			{
+				var information = _jsonManager.GetServer(GuildId);
+				if (information == null) return;
+
+				var textChannel = await _discordClient.GetChannelAsync(information.MusicChannelId);
+				await UpdateEmbedAsync(textChannel);
+			}
 		}
-		else
+		catch (Exception ex)
 		{
-			await base.NotifyTrackEndedAsync(queueItem, endReason, cancellationToken);
+			_logger.LogError(ex, "Error in NotifyTrackEndedAsync for guild {GuildId}", GuildId);
 		}
 	}
 
 	protected override async ValueTask NotifyTrackStartedAsync(ITrackQueueItem track, CancellationToken cancellationToken = default)
 	{
+		try
+		{
+			await base.NotifyTrackStartedAsync(track, cancellationToken);
 
-		await base.NotifyTrackStartedAsync(track, cancellationToken);
-		var information = _jsonManager.ServerExists(this.GuildId.ToString());
-		var textChannel = await _discordClient.GetChannelAsync(ulong.Parse(information.MusicChannelId));
-		UpdateEmbed(textChannel);
+			var information = _jsonManager.GetServer(GuildId);
+			if (information == null) return;
+
+			var textChannel = await _discordClient.GetChannelAsync(information.MusicChannelId);
+			await UpdateEmbedAsync(textChannel);
+		}
+		catch (Exception ex)
+		{
+			_logger.LogError(ex, "Error in NotifyTrackStartedAsync for guild {GuildId}", GuildId);
+		}
 	}
 
 	protected override async ValueTask NotifyTrackEnqueuedAsync(ITrackQueueItem queueItem, int position, CancellationToken cancellationToken = default)
 	{
-		cancellationToken.ThrowIfCancellationRequested();
-		ArgumentNullException.ThrowIfNull(queueItem);
+		try
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+			ArgumentNullException.ThrowIfNull(queueItem);
 
-		var information = _jsonManager.ServerExists(this.GuildId.ToString());
-		var textChannel = await _discordClient.GetChannelAsync(ulong.Parse(information.MusicChannelId));
-		UpdateEmbed(textChannel);
+			var information = _jsonManager.GetServer(GuildId);
+			if (information == null) return;
+
+			var textChannel = await _discordClient.GetChannelAsync(information.MusicChannelId);
+			await UpdateEmbedAsync(textChannel);
+		}
+		catch (Exception ex)
+		{
+			_logger.LogError(ex, "Error in NotifyTrackEnqueuedAsync for guild {GuildId}", GuildId);
+		}
 	}
 
-	public async void UpdateEmbed(DiscordChannel channel)
+	public async Task UpdateEmbedAsync(DiscordChannel channel)
 	{
 		try
 		{
 			DiscordEmbed embed = EmbedHelper.GenerateEmbed(this);
+			DiscordMessage? msg = await GetMusicMessageAsync(GuildId, channel);
 
-			DiscordMessage msg = await GetMusicMessage(this.GuildId, channel);
-			await msg.ModifyAsync(embed);
-		}catch(Exception e)
+			if (msg != null)
+			{
+				await msg.ModifyAsync(embed);
+			}
+		}
+		catch (Exception ex)
 		{
-			Console.WriteLine(e.ToString());
+			_logger.LogError(ex, "Failed to update embed for guild {GuildId}", GuildId);
 		}
 	}
 
-	private async Task<DiscordMessage> GetMusicMessage(ulong guildId, DiscordChannel channel)
+	private async Task<DiscordMessage?> GetMusicMessageAsync(ulong guildId, DiscordChannel channel)
 	{
-		foreach (ServerInformation server in _jsonManager.Servers)
+		try
 		{
-			if (guildId.ToString() == server.Id)
-			{
-				DiscordMessage msg = await channel.GetMessageAsync(ulong.Parse(server.MusicMessageId));
-				return msg;
-			}
-		}
+			var server = _jsonManager.GetServer(guildId);
+			if (server == null) return null;
 
-		return null;
+			return await channel.GetMessageAsync(server.MusicMessageId);
+		}
+		catch (Exception ex)
+		{
+			_logger.LogWarning(ex, "Could not get music message for guild {GuildId}", guildId);
+			return null;
+		}
 	}
 }
 

@@ -1,4 +1,4 @@
-﻿using DSharpPlus;
+using DSharpPlus;
 using DSharpPlus.Entities;
 using DSharpPlus.EventArgs;
 using DSharpPlus.SlashCommands;
@@ -11,11 +11,33 @@ using Lavalink4NET;
 using Microsoft.Extensions.Logging;
 using Lavalink4NET.Rest.Entities.Tracks;
 using Microsoft.Extensions.Options;
-using Lavalink4NET.Rest;
-using Lavalink4NET.Tracks;
-using System.Numerics;
+using DSharpPlus.VoiceNext;
+
+// Load .env file if it exists
+var envPath = Path.Combine(AppContext.BaseDirectory, ".env");
+if (File.Exists(envPath))
+{
+    foreach (var line in File.ReadAllLines(envPath))
+    {
+        var trimmed = line.Trim();
+        if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith('#')) continue;
+
+        var separatorIndex = trimmed.IndexOf('=');
+        if (separatorIndex <= 0) continue;
+
+        var key = trimmed[..separatorIndex].Trim();
+        var value = trimmed[(separatorIndex + 1)..].Trim();
+        Environment.SetEnvironmentVariable(key, value);
+    }
+}
 
 var builder = new HostApplicationBuilder(args);
+
+// Logging (register early so other services can use it)
+builder.Services.AddLogging(s => s.AddConsole().SetMinimumLevel(LogLevel.Debug));
+
+// Configuration
+builder.Services.AddSingleton<JSONManager>();
 
 // DSharpPlus
 builder.Services.AddHostedService<ApplicationHost>();
@@ -23,357 +45,458 @@ builder.Services.AddSingleton<DiscordClient>();
 builder.Services.AddSingleton(
     new DiscordConfiguration
     {
-        Token = "",
+        Token = Environment.GetEnvironmentVariable("DISCORD_BOT_TOKEN")
+            ?? throw new InvalidOperationException("DISCORD_BOT_TOKEN environment variable not set"),
         Intents = DiscordIntents.All
-    }
-    ); // Put token here
+    });
 
 // Lavalink
 builder.Services.AddLavalink();
 builder.Services.ConfigureLavalink(config =>
 {
-    config.BaseAddress = new Uri("http://localhost:2333");
+    config.BaseAddress = new Uri(Environment.GetEnvironmentVariable("LAVALINK_URL") ?? "http://localhost:2333");
     config.ReadyTimeout = TimeSpan.FromSeconds(10);
-    config.Passphrase = "youshallnotpass";
+    config.Passphrase = Environment.GetEnvironmentVariable("LAVALINK_PASSWORD") ?? "youshallnotpass";
 });
-
-
-// Logging
-builder.Services.AddLogging(s => s.AddConsole().SetMinimumLevel(LogLevel.Debug));
 
 builder.Build().Run();
 
 file sealed class ApplicationHost : BackgroundService
 {
-
     private readonly DiscordClient _discordClient;
     private readonly IAudioService _audioService;
     private readonly JSONManager _jsonManager;
+    private readonly ILogger<ApplicationHost> _logger;
+    private readonly ILoggerFactory _loggerFactory;
 
-    public ApplicationHost(DiscordClient discordClient, IAudioService audioService)
+    public ApplicationHost(DiscordClient discordClient, IAudioService audioService, JSONManager jsonManager, ILogger<ApplicationHost> logger, ILoggerFactory loggerFactory)
     {
         ArgumentNullException.ThrowIfNull(discordClient);
         ArgumentNullException.ThrowIfNull(audioService);
+        ArgumentNullException.ThrowIfNull(jsonManager);
 
         _discordClient = discordClient;
         _audioService = audioService;
-        _jsonManager = new JSONManager();
+        _jsonManager = jsonManager;
+        _logger = logger;
+        _loggerFactory = loggerFactory;
+
         var slash = _discordClient.UseSlashCommands();
         slash.RegisterCommands<SlashCommands>();
+
+        // Initialize VoiceNext for voice channel connections
+        _discordClient.UseVoiceNext();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // connect to discord gateway and initialize node connection
-        await _discordClient
-            .ConnectAsync()
-            .ConfigureAwait(false);
+        await _jsonManager.LoadAsync();
 
-        var readyTaskCompletionSource = new TaskCompletionSource();
+        _discordClient.Ready += OnClientReadyAsync;
+        _discordClient.MessageCreated += OnMessageCreatedAsync;
+        _discordClient.ComponentInteractionCreated += OnButtonReactionAsync;
+        _discordClient.MessageDeleted += OnMessageDeletedAsync;
 
-        Task SetResult(DiscordClient client, ReadyEventArgs eventArgs)
+        await _discordClient.ConnectAsync();
+
+        _logger.LogInformation("Bot connected to Discord");
+
+        // Keep the service running until cancellation is requested
+        try
         {
-            readyTaskCompletionSource.TrySetResult();
-            return Task.CompletedTask;
+            await Task.Delay(Timeout.Infinite, stoppingToken);
         }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Shutdown requested");
+        }
+        finally
+        {
+            _discordClient.Ready -= OnClientReadyAsync;
+            _discordClient.MessageCreated -= OnMessageCreatedAsync;
+            _discordClient.ComponentInteractionCreated -= OnButtonReactionAsync;
+            _discordClient.MessageDeleted -= OnMessageDeletedAsync;
 
-        await _jsonManager.ReadJSON();
-
-        _discordClient.Ready += SetResult;
-        _discordClient.Ready += OnClientReady;
-        _discordClient.MessageCreated += OnMessageCreated;  // User sends messahge in some channel
-        _discordClient.ComponentInteractionCreated += OnButtonReactionAsync;  // User clicks button
-        _discordClient.MessageDeleted += OnMessageDeletedAsync;  // When user deletes message
-
-        await readyTaskCompletionSource.Task.ConfigureAwait(false);
-
-        //_discordClient.MessageDeleted -= OnMessageDeletedAsync;  Where tf put these?
-        //_discordClient.ComponentInteractionCreated -= OnButtonReactionAsync;
-        //_discordClient.MessageCreated -= OnMessageCreated;
-        _discordClient.Ready -= OnClientReady;
-        _discordClient.Ready -= SetResult;
+            await _discordClient.DisconnectAsync();
+        }
     }
 
-    private async Task<Task> OnClientReady(DiscordClient sender, ReadyEventArgs e)
+    private async Task OnClientReadyAsync(DiscordClient sender, ReadyEventArgs e)
     {
-
-        foreach (ServerInformation server in _jsonManager.Servers)
+        try
         {
+            _logger.LogInformation("Discord client ready, initializing {Count} servers", _jsonManager.Servers.Count());
 
-            IReadOnlyList<DiscordChannel> botChannels = await _discordClient.Guilds[ulong.Parse(server.Id)].GetChannelsAsync(); // Get all channels in guild
-
-            DiscordChannel botChannel = botChannels.First(x => x.Id == ulong.Parse(server.MusicChannelId));  // Get the channel the bot is using
-
-            // Delete old message, new message gets created in MessageDeleted event
-            try
+            foreach (ServerInformation server in _jsonManager.Servers)
             {
-                DiscordMessage oldMessage = await botChannel.GetMessageAsync(ulong.Parse(server.MusicMessageId));
-                await oldMessage.DeleteAsync();
-            }
-            catch (Exception)
-            {
-                await CreateMusicMessage(server);
+                try
+                {
+                    if (!_discordClient.Guilds.TryGetValue(server.Id, out var guild))
+                    {
+                        _logger.LogWarning("Guild {GuildId} not found", server.Id);
+                        continue;
+                    }
+
+                    var botChannels = await guild.GetChannelsAsync();
+                    var botChannel = botChannels.FirstOrDefault(x => x.Id == server.MusicChannelId);
+
+                    if (botChannel == null)
+                    {
+                        _logger.LogWarning("Music channel {ChannelId} not found in guild {GuildId}", server.MusicChannelId, server.Id);
+                        continue;
+                    }
+
+                    try
+                    {
+                        var oldMessage = await botChannel.GetMessageAsync(server.MusicMessageId);
+                        await oldMessage.DeleteAsync();
+                    }
+                    catch
+                    {
+                        await CreateMusicMessageAsync(server);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error initializing server {ServerId}", server.Id);
+                }
             }
         }
-
-        return Task.CompletedTask;
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in OnClientReadyAsync");
+        }
     }
 
     private async Task OnMessageDeletedAsync(DiscordClient sender, MessageDeleteEventArgs args)
     {
-        ServerInformation guildInfo = _jsonManager.ServerExists(args.Guild.Id.ToString());
-
-        if (guildInfo.MusicMessageId != args.Message.Id.ToString()) return;
-
-        await CreateMusicMessage(guildInfo);
-    }
-
-    public async Task CreateMusicMessage(ServerInformation guildInfo)
-    {
-        var builder = new DiscordMessageBuilder();  // Generate DJ Message
-        builder.WithEmbed(EmbedHelper.GenerateEmbed())
-            .AddComponents(EmbedHelper.GenerateButtonComponents());
-
-        IReadOnlyList<DiscordChannel> botChannels = await _discordClient.Guilds[ulong.Parse(guildInfo.Id)].GetChannelsAsync(); // Get all channels in guild
-
-        DiscordChannel botChannel = botChannels.First(x => x.Id == ulong.Parse(guildInfo.MusicChannelId));  // Get the channel the bot is using
-
-        DiscordMessage newMessage = await botChannel.SendMessageAsync(builder);  // Send new message
-
-        guildInfo.MusicMessageId = newMessage.Id.ToString();  // Update Server Info with new message
-        await _jsonManager.UpdateServerList();
-
-        // Delete up to 10 messages before embed to clean up
-        IReadOnlyList<DiscordMessage> messages = await botChannel.GetMessagesBeforeAsync(newMessage.Id, 10);
-
-        if (messages != null && messages.Count > 0)
-            await botChannel.DeleteMessagesAsync(messages);
-    }
-
-    /// <summary>
-    /// Fired when a user posts a message.
-    /// Use PINEAPPLE to init the bot for a guild.
-    /// Only takes messages in the PINAPPLE chat into account.
-    /// </summary>
-    /// <param name="senderClient"> User who sent the message </param>
-    /// <returns></returns>
-    private async Task OnMessageCreated(DiscordClient senderClient, MessageCreateEventArgs args)
-    {
-        DiscordMember sender = args.Message.Author as DiscordMember;
-
-        if (sender == null) return;
-
-        ServerInformation guildInfo = _jsonManager.ServerExists(sender.Guild.Id.ToString());
-
-        if (CheckIfMessageIsInit(args, guildInfo))  // Check if user wants to init the bot and if so add this server to the list
+        try
         {
-            if (guildInfo == null)
-                guildInfo = _jsonManager.ServerExists(sender.Guild.Id.ToString());
+            if (args.Guild == null) return;
 
-            var builder = new DiscordMessageBuilder();
-            builder.WithEmbed(EmbedHelper.GenerateEmbed())
+            var guildInfo = _jsonManager.GetServer(args.Guild.Id);
+            if (guildInfo == null) return;
+
+            if (guildInfo.MusicMessageId != args.Message.Id) return;
+
+            await CreateMusicMessageAsync(guildInfo);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in OnMessageDeletedAsync for guild {GuildId}", args.Guild?.Id);
+        }
+    }
+
+    private async Task CreateMusicMessageAsync(ServerInformation guildInfo)
+    {
+        try
+        {
+            var messageBuilder = new DiscordMessageBuilder()
+                .WithEmbed(EmbedHelper.GenerateEmbed())
                 .AddComponents(EmbedHelper.GenerateButtonComponents());
 
-            DiscordMessage message = await args.Channel.SendMessageAsync(builder);
-            guildInfo.MusicMessageId = message.Id.ToString();
-            await _jsonManager.UpdateServerList();
-            await args.Message.DeleteAsync();
-            return;
-        }
+            if (!_discordClient.Guilds.TryGetValue(guildInfo.Id, out var guild))
+            {
+                _logger.LogWarning("Guild {GuildId} not found when creating music message", guildInfo.Id);
+                return;
+            }
 
-        if (!CheckIfMessageIsInCorrectChannel(args))
+            var botChannels = await guild.GetChannelsAsync();
+            var botChannel = botChannels.FirstOrDefault(x => x.Id == guildInfo.MusicChannelId);
+
+            if (botChannel == null)
+            {
+                _logger.LogWarning("Music channel {ChannelId} not found in guild {GuildId}", guildInfo.MusicChannelId, guildInfo.Id);
+                return;
+            }
+
+            var newMessage = await botChannel.SendMessageAsync(messageBuilder);
+
+            guildInfo.MusicMessageId = newMessage.Id;
+            await _jsonManager.SaveAsync();
+
+            // Delete up to 10 messages before embed to clean up
+            var messages = await botChannel.GetMessagesBeforeAsync(newMessage.Id, 10);
+
+            if (messages != null && messages.Count > 0)
+            {
+                await botChannel.DeleteMessagesAsync(messages);
+            }
+        }
+        catch (Exception ex)
         {
-            return;
+            _logger.LogError(ex, "Error creating music message for guild {GuildId}", guildInfo.Id);
         }
-
-        if (args.Author.IsBot)
-        {
-            if (!args.Author.IsCurrent)
-                await args.Message.DeleteAsync();
-
-            return;
-        }
-
-        bool isCommand = await CheckIsCommand(sender, sender.Guild.Id, args);
-
-        if (isCommand)  // Check if message is a command and execute it.
-        {
-            await args.Message.DeleteAsync();
-            return;
-        }
-
-        if (sender.VoiceState == null || sender.VoiceState.Channel.Type != ChannelType.Voice)  // Sender not in channel
-        {
-            await sender.SendMessageAsync("Error 🤡: Du dich hierfür in einem Voice Channel befinden");
-            await args.Message.DeleteAsync();
-            return;
-        }
-
-        var player = await GetPlayerAsync(sender.Guild.Id, sender.VoiceState.Channel.Id, true).ConfigureAwait(false);
-        if (player == null)  // Check if there is no Lavalink connection
-        {
-            await sender.SendMessageAsync("Error 1: Verbindung fehlgeschlagen");
-            await args.Message.DeleteAsync();
-            return;
-        }
-
-        // Search for input
-        LavalinkTrack track = await _audioService.Tracks.LoadTrackAsync(args.Message.Content, TrackSearchMode.YouTube).ConfigureAwait(false);
-
-        if (track == null)  // No matches for input
-        {
-            await sender.SendMessageAsync("Error 2: Video konnte nicht gefunden werden");
-            await args.Message.DeleteAsync();
-            return;
-        }
-
-        if (track.Uri.ToString() == "https://www.youtube.com/watch?v=mQfkFxUQKD8")
-        {
-            await sender.SendMessageAsync("Error 3: Du kleiner goh");
-            await args.Message.DeleteAsync();
-            return;
-        }
-
-        if (guildInfo.TTSEnabled)  // Don't have TTS Plugin yet
-        {
-            LavalinkTrack ttsTrack = await _audioService.Tracks.GetTextToSpeechTrackAsync("Now playing." + track.Title);
-
-            if (ttsTrack != null)
-                await player.PlayAsync(ttsTrack).ConfigureAwait(false);
-        }
-
-
-        await player.PlayAsync(track).ConfigureAwait(false);  // Queues the track
-
-        player.UpdateEmbed(args.Channel);
-
-        await args.Message.DeleteAsync();
     }
 
-    /// <summary>
-    /// Check if the message is the init codeword "PINEAPPLE". If it is add this server to the bots serverlist
-    /// </summary>
-    /// <param name="args"></param>
-    /// <param name="server"></param>
-    /// <returns></returns>
-    private bool CheckIfMessageIsInit(MessageCreateEventArgs args, ServerInformation server)
+    private async Task OnMessageCreatedAsync(DiscordClient senderClient, MessageCreateEventArgs args)
     {
-        if (args.Message.Content == "PINEAPPLE")  // Special word to init the bot
+        try
         {
-            if (server == null)
-                _jsonManager.Servers.Add(new ServerInformation
+            if (args.Guild == null) return;
+
+            var sender = args.Message.Author as DiscordMember;
+            if (sender == null) return;
+
+            var guildInfo = _jsonManager.GetServer(sender.Guild.Id);
+
+            // Check if user wants to init the bot
+            if (await TryHandleInitMessageAsync(args, guildInfo))
+            {
+                return;
+            }
+
+            // Only process messages in configured music channels
+            if (!IsMessageInMusicChannel(args))
+            {
+                return;
+            }
+
+            // Delete messages from other bots
+            if (args.Author.IsBot)
+            {
+                if (!args.Author.IsCurrent)
                 {
-                    Id = args.Guild.Id.ToString(),
-                    MusicChannelId = args.Channel.Id.ToString(),
-                });
-            else
-                server.MusicChannelId = args.Channel.Id.ToString();
+                    await args.Message.DeleteAsync();
+                }
+                return;
+            }
 
+            // Handle commands
+            if (await TryHandleCommandAsync(sender, sender.Guild.Id, args))
+            {
+                await args.Message.DeleteAsync();
+                return;
+            }
+
+            // Validate voice state
+            if (sender.VoiceState?.Channel == null || sender.VoiceState.Channel.Type != ChannelType.Voice)
+            {
+                await sender.SendMessageAsync("Error: Du musst dich in einem Voice Channel befinden");
+                await args.Message.DeleteAsync();
+                return;
+            }
+
+            var player = await GetPlayerAsync(sender.Guild.Id, sender.VoiceState.Channel.Id, true);
+            if (player == null)
+            {
+                await sender.SendMessageAsync("Error 1: Verbindung fehlgeschlagen");
+                await args.Message.DeleteAsync();
+                return;
+            }
+
+            // Check if it's a playlist URL
+            if (IsPlaylistUrl(args.Message.Content))
+            {
+                var loadResult = await _audioService.Tracks.LoadTracksAsync(args.Message.Content, TrackSearchMode.None);
+
+                if (!loadResult.IsSuccess || loadResult.Playlist is null || !loadResult.Tracks.Any())
+                {
+                    await sender.SendMessageAsync("Error 2: Playlist konnte nicht geladen werden");
+                    await args.Message.DeleteAsync();
+                    return;
+                }
+
+                var tracks = loadResult.Tracks.ToList();
+                int addedCount = 0;
+
+                foreach (var track in tracks)
+                {
+                    if (track.Uri?.ToString() == "https://www.youtube.com/watch?v=mQfkFxUQKD8")
+                    {
+                        continue;
+                    }
+
+                    await player.PlayAsync(track);
+                    addedCount++;
+                }
+
+                _logger.LogInformation("Added {Count} tracks from playlist '{PlaylistName}' to queue", addedCount, loadResult.Playlist.Name);
+                await player.UpdateEmbedAsync(args.Channel);
+                await args.Message.DeleteAsync();
+                return;
+            }
+
+            // Search for single track
+            var singleTrack = await _audioService.Tracks.LoadTrackAsync(args.Message.Content, TrackSearchMode.YouTube);
+
+            if (singleTrack == null)
+            {
+                await sender.SendMessageAsync("Error 2: Video konnte nicht gefunden werden");
+                await args.Message.DeleteAsync();
+                return;
+            }
+
+            if (singleTrack.Uri?.ToString() == "https://www.youtube.com/watch?v=mQfkFxUQKD8")
+            {
+                await sender.SendMessageAsync("Error 3: Du kleiner goh");
+                await args.Message.DeleteAsync();
+                return;
+            }
+
+            await player.PlayAsync(singleTrack);
+            await player.UpdateEmbedAsync(args.Channel);
+            await args.Message.DeleteAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in OnMessageCreatedAsync for guild {GuildId}", args.Guild?.Id);
+        }
+    }
+
+    private async Task<bool> TryHandleInitMessageAsync(MessageCreateEventArgs args, ServerInformation? existingServer)
+    {
+        if (args.Message.Content != "PINEAPPLE")
+        {
+            return false;
+        }
+
+        var guildInfo = _jsonManager.GetOrCreateServer(args.Guild.Id, args.Channel.Id);
+
+        var messageBuilder = new DiscordMessageBuilder()
+            .WithEmbed(EmbedHelper.GenerateEmbed())
+            .AddComponents(EmbedHelper.GenerateButtonComponents());
+
+        var message = await args.Channel.SendMessageAsync(messageBuilder);
+        guildInfo.MusicMessageId = message.Id;
+        await _jsonManager.SaveAsync();
+        await args.Message.DeleteAsync();
+
+        _logger.LogInformation("Bot initialized for guild {GuildId} in channel {ChannelId}", args.Guild.Id, args.Channel.Id);
+
+        return true;
+    }
+
+    private bool IsMessageInMusicChannel(MessageCreateEventArgs args)
+    {
+        var server = _jsonManager.GetServer(args.Guild.Id);
+        return server != null && args.Channel.Id == server.MusicChannelId;
+    }
+
+    private async Task<bool> TryHandleCommandAsync(DiscordMember sender, ulong guildId, MessageCreateEventArgs args)
+    {
+        if (!args.Message.Content.StartsWith("!"))
+        {
+            return false;
+        }
+
+        if (args.Message.Content.Length == 1)
+        {
             return true;
         }
 
-        return false;
-    }
-
-    private bool CheckIfMessageIsInCorrectChannel(MessageCreateEventArgs args)
-    {
-        foreach (ServerInformation server in _jsonManager.Servers)
-        {
-            if (args.Channel.Id.ToString() == server.MusicChannelId)
-                return true;
-        }
-
-        return false;
-    }
-
-    private async Task<bool> CheckIsCommand(DiscordMember sender, ulong guildId, MessageCreateEventArgs args)
-    {
-
-        if (args.Message.Content.StartsWith("!"))
-        {
-
-            if (args.Message.Content.Length == 1)
-                return true;
-
-            await HandleCommandAsync(sender, guildId, args.Channel, args.Message.Content.Substring(1));
-            return true;
-        }
-
-        return false;
+        await HandleCommandAsync(sender, guildId, args.Channel, args.Message.Content[1..]);
+        return true;
     }
 
     private async Task HandleCommandAsync(DiscordMember sender, ulong guildId, DiscordChannel channel, string command)
     {
-        string[] cmd = command.ToLower().Split(separator: new char[] { ' ' }, count: 2);
-
-        if (cmd.Length != 2)
+        if (sender.VoiceState?.Channel == null)
         {
-            cmd = new string[] { cmd[0], "" };
+            return;
         }
 
+        string[] cmd = command.ToLower().Split(separator: [' '], count: 2);
         string mainCommand = cmd[0];
-        string parameters = cmd[1];
+        string parameters = cmd.Length > 1 ? cmd[1] : "";
 
-        var player = await GetPlayerAsync(guildId, sender.VoiceState.Channel.Id, false).ConfigureAwait(false);
-
+        var player = await GetPlayerAsync(guildId, sender.VoiceState.Channel.Id, false);
         if (player == null)
+        {
             return;
+        }
 
         await CommandHandler.HandleCommandAsync(mainCommand, parameters, player, channel, _jsonManager);
     }
 
     private async Task OnButtonReactionAsync(DiscordClient clientSender, ComponentInteractionCreateEventArgs args)
     {
-        await args.Interaction.CreateResponseAsync(InteractionResponseType.DeferredMessageUpdate);
+        try
+        {
+            await args.Interaction.CreateResponseAsync(InteractionResponseType.DeferredMessageUpdate);
 
-        string buttonId = args.Id;
+            // Handle Join button separately
+            if (args.Id == "4")
+            {
+                var member = await args.Guild.GetMemberAsync(args.User.Id);
+                var voiceChannel = member?.VoiceState?.Channel;
+                if (voiceChannel != null)
+                {
+                    var vnext = clientSender.GetVoiceNext();
+                    var existingConnection = vnext.GetConnection(args.Guild);
+                    if (existingConnection == null)
+                    {
+                        await vnext.ConnectAsync(voiceChannel);
+                    }
+                }
+                return;
+            }
 
-        DiscordMember sender = args.User as DiscordMember;
+            var sender = await args.Guild.GetMemberAsync(args.User.Id);
+            if (sender?.VoiceState?.Channel == null)
+            {
+                return;
+            }
 
-        if (sender.VoiceState.Channel == null) return;
+            var player = await GetPlayerAsync(args.Guild.Id, sender.VoiceState.Channel.Id, true);
+            if (player == null)
+            {
+                return;
+            }
 
-        var player = await GetPlayerAsync(args.Guild.Id, sender.VoiceState.Channel.Id, true).ConfigureAwait(false);
-        if (player == null)
-            return;
+            await EmbedInteractions.HandleButtonAsync(args.Id, player, args);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in OnButtonReactionAsync for guild {GuildId}", args.Guild?.Id);
+        }
+    }
 
-        await EmbedInteractions.HandleButtonAsync(buttonId, player, args);
+    private static bool IsPlaylistUrl(string input)
+    {
+        // Check for YouTube playlist URL patterns
+        if (string.IsNullOrWhiteSpace(input))
+            return false;
+
+        // YouTube playlist URLs contain "list=" parameter
+        return input.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) &&
+               input.Contains("list=", StringComparison.OrdinalIgnoreCase);
     }
 
     private async ValueTask<CustomQueuedPlayer?> GetPlayerAsync(ulong guildId, ulong memberVoiceChannel, bool connectToVoiceChannel = true)
     {
-        // Only allow the player to connect if connectToVoiceChannel is true
-        var channelBehavior = connectToVoiceChannel
-            ? PlayerChannelBehavior.Join
-            : PlayerChannelBehavior.None;
-
-        var retrieveOptions = new PlayerRetrieveOptions(ChannelBehavior: channelBehavior);
-
-        // Get the guilds player or create a Queues
-        var playerOptions = Options.Create(new QueuedLavalinkPlayerOptions
+        try
         {
-            SelfDeaf = true
-        });
+            var channelBehavior = connectToVoiceChannel
+                ? PlayerChannelBehavior.Join
+                : PlayerChannelBehavior.None;
 
-        var playerFactory = PlayerFactory.Create<CustomQueuedPlayer, QueuedLavalinkPlayerOptions>(properties => new CustomQueuedPlayer(properties, _discordClient, _jsonManager));
+            var retrieveOptions = new PlayerRetrieveOptions(ChannelBehavior: channelBehavior);
 
-        var result = await _audioService.Players
-            .RetrieveAsync(guildId, memberVoiceChannel, playerFactory, playerOptions, retrieveOptions)
-            .ConfigureAwait(false);
-
-        // Error handling
-        if (!result.IsSuccess)
-        {
-            var errorMessage = result.Status switch
+            var playerOptions = Options.Create(new QueuedLavalinkPlayerOptions
             {
-                PlayerRetrieveStatus.UserNotInVoiceChannel => "You are not connected to a voice channel.",
-                PlayerRetrieveStatus.BotNotConnected => "The bot is currently not connected.",
-                _ => "Unknown error.",
-            };
+                SelfDeaf = true
+            });
 
-            // send errorMessage to user
+            var playerLogger = _loggerFactory.CreateLogger<CustomQueuedPlayer>();
+            var playerFactory = PlayerFactory.Create<CustomQueuedPlayer, QueuedLavalinkPlayerOptions>(
+                properties => new CustomQueuedPlayer(properties, _discordClient, _jsonManager, playerLogger));
+
+            var result = await _audioService.Players
+                .RetrieveAsync(guildId, memberVoiceChannel, playerFactory, playerOptions, retrieveOptions);
+
+            if (!result.IsSuccess)
+            {
+                _logger.LogWarning("Failed to get player for guild {GuildId}: {Status}", guildId, result.Status);
+                return null;
+            }
+
+            return result.Player;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting player for guild {GuildId}", guildId);
             return null;
         }
-
-        return result.Player;
     }
 }

@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 
 public static class EmbedHelper
 {
-	private static readonly string TITLE = "Sus Music TM 3.2";
+	private static readonly string TITLE = "Sus Music TM 4.1";
 
 	/// <summary>
 	/// Gets the thumbnail url of a youtube video.
@@ -109,6 +109,7 @@ public static class EmbedHelper
 					new DiscordButtonComponent(ButtonStyle.Primary, $"1", "Skip"),
 					new DiscordButtonComponent(ButtonStyle.Secondary, $"2", "Pause"),
 					new DiscordButtonComponent(ButtonStyle.Success, $"3", "Loop"),
+					new DiscordButtonComponent(ButtonStyle.Primary, $"4", "Join"),
 			};
 	}
 
