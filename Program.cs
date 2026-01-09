@@ -63,6 +63,8 @@ builder.Build().Run();
 
 file sealed class ApplicationHost : BackgroundService
 {
+    private const int MaxPlaylistTracks = 100;
+
     private readonly DiscordClient _discordClient;
     private readonly IAudioService _audioService;
     private readonly JSONManager _jsonManager;
@@ -297,21 +299,39 @@ file sealed class ApplicationHost : BackgroundService
                     return;
                 }
 
-                var tracks = loadResult.Tracks.ToList();
+                int totalTracks = loadResult.Tracks.Count();
                 int addedCount = 0;
 
-                foreach (var track in tracks)
+                // Suppress embed updates during bulk add to avoid rate limiting
+                player.SuppressEmbedUpdates = true;
+                try
                 {
-                    if (track.Uri?.ToString() == "https://www.youtube.com/watch?v=mQfkFxUQKD8")
+                    // Limit playlist size and enumerate directly without materializing full list
+                    foreach (var track in loadResult.Tracks.Take(MaxPlaylistTracks))
                     {
-                        continue;
-                    }
+                        if (track.Uri?.ToString() == "https://www.youtube.com/watch?v=mQfkFxUQKD8")
+                        {
+                            continue;
+                        }
 
-                    await player.PlayAsync(track);
-                    addedCount++;
+                        await player.PlayAsync(track);
+                        addedCount++;
+                    }
+                }
+                finally
+                {
+                    player.SuppressEmbedUpdates = false;
                 }
 
-                _logger.LogInformation("Added {Count} tracks from playlist '{PlaylistName}' to queue", addedCount, loadResult.Playlist.Name);
+                if (totalTracks > MaxPlaylistTracks)
+                {
+                    _logger.LogInformation("Added {Count} tracks from playlist '{PlaylistName}' (limited from {Total})", addedCount, loadResult.Playlist.Name, totalTracks);
+                }
+                else
+                {
+                    _logger.LogInformation("Added {Count} tracks from playlist '{PlaylistName}'", addedCount, loadResult.Playlist.Name);
+                }
+
                 await player.UpdateEmbedAsync(args.Channel);
                 await args.Message.DeleteAsync();
                 return;

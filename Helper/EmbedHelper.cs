@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 
 public static class EmbedHelper
 {
-	private static readonly string TITLE = "Sus Music TM 4.1";
+	private static readonly string TITLE = "Sus Music TM 4.2";
 
 	/// <summary>
 	/// Gets the thumbnail url of a youtube video.
@@ -48,6 +48,9 @@ public static class EmbedHelper
 
 	public static DiscordEmbed GenerateEmbed(QueuedLavalinkPlayer player)
 	{
+		const int MaxFieldLength = 1024;
+		const string MoreSuffix = "\n... and {0} more";
+
 		var nowPlayingEmbed = new DiscordEmbedBuilder()
 		{
 			Title = TITLE,
@@ -58,10 +61,25 @@ public static class EmbedHelper
 		if (player.CurrentTrack != null)  // Something is in queue
 		{
 			string queue = "Queue:";
+			int displayedCount = 0;
+			int totalCount = player.Queue.Count;
 
-			for (int i = 0; i < player.Queue.Count; i++)
+			foreach (var (item, index) in player.Queue.Select((item, i) => (item, i)))
 			{
-				queue += $"\n{i}: {player.Queue.Skip(i).First().Track.Title} - {player.Queue.Skip(i).First().Track.Author}";
+				string entry = $"\n{index}: {item.Track.Title} - {item.Track.Author}";
+
+				// Reserve space for "... and X more" suffix (estimate max digits needed)
+				int reservedSpace = string.Format(MoreSuffix, totalCount).Length;
+
+				if (queue.Length + entry.Length + reservedSpace > MaxFieldLength)
+				{
+					int remaining = totalCount - displayedCount;
+					queue += string.Format(MoreSuffix, remaining);
+					break;
+				}
+
+				queue += entry;
+				displayedCount++;
 			}
 
 			if (queue == "Queue:")
