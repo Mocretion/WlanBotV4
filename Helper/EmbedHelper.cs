@@ -10,7 +10,12 @@ using System.Threading.Tasks;
 
 public static class EmbedHelper
 {
-	private static readonly string TITLE = "Sus Music TM 4.2";
+	private static readonly string TITLE = "Sus Music TM 4.3";
+	private static readonly string NIGHTCORE_INDICATOR = " [NIGHTCORE]";
+	private static readonly string NIGHTCORE_DEFAULT_IMAGE = "https://i.ytimg.com/vi/6D3GilRVJxY/hq720.jpg";
+	private static readonly string STANDARD_DEFAULT_IMAGE = "https://c.tenor.com/CZd0MAcCnNcAAAAC/among-us-amogus.gif";
+	private static readonly DiscordColor NIGHTCORE_PLAYING_COLOR = new DiscordColor(0xFF69B4); // Pink
+	private static readonly DiscordColor NIGHTCORE_IDLE_COLOR = new DiscordColor(0x9B59B6); // Purple
 
 	/// <summary>
 	/// Gets the thumbnail url of a youtube video.
@@ -28,25 +33,31 @@ public static class EmbedHelper
 
 	public static DiscordEmbed GenerateEmbed()
 	{
+		return GenerateEmbedIdle(nightcoreEnabled: false);
+	}
+
+	public static DiscordEmbed GenerateEmbedIdle(bool nightcoreEnabled)
+	{
+		string ncIndicator = nightcoreEnabled ? NIGHTCORE_INDICATOR : "";
+		string defaultImage = nightcoreEnabled ? NIGHTCORE_DEFAULT_IMAGE : STANDARD_DEFAULT_IMAGE;
+		var idleColor = nightcoreEnabled ? NIGHTCORE_IDLE_COLOR : DiscordColor.Red;
+
 		var nowPlayingEmbed = new DiscordEmbedBuilder()
 		{
-			Title = TITLE,
+			Title = TITLE + ncIndicator,
 			Description = "Queue music by sending a url or title",
 			Url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"  // Rick Roll
 		};
 
 		nowPlayingEmbed.AddField("Nothing is playing.", "The queue is empty.")
-				.WithFooter("Made by Mocretion")
-				.WithImageUrl("https://c.tenor.com/CZd0MAcCnNcAAAAC/among-us-amogus.gif")
-				.WithTitle(TITLE)
-				.WithColor(DiscordColor.Red);
+				.WithFooter("Made by Mocretion. !help for commands")
+				.WithImageUrl(defaultImage)
+				.WithColor(idleColor);
 
-		DiscordEmbed embed = nowPlayingEmbed.Build();
-
-		return embed;
+		return nowPlayingEmbed.Build();
 	}
 
-	public static DiscordEmbed GenerateEmbed(QueuedLavalinkPlayer player)
+	public static DiscordEmbed GenerateEmbed(QueuedLavalinkPlayer player, bool nightcoreEnabled = false)
 	{
 		const int MaxFieldLength = 1024;
 		const string MoreSuffix = "\n... and {0} more";
@@ -87,31 +98,39 @@ public static class EmbedHelper
 
 			nowPlayingEmbed.AddField($"{player.CurrentTrack.Title} - {player.CurrentTrack.Author} - {player.CurrentTrack.Duration}", queue)
 				.WithAuthor("SusBot")
-				.WithFooter("Made by Mocretion")
+				.WithFooter("Made by Mocretion. !help for commands")
 				.WithImageUrl(GetYouTubeThumbnail(player.CurrentTrack.Uri.ToString(), 0))
 				.WithUrl(player.CurrentTrack.Uri);
+
+			string ncIndicator = nightcoreEnabled ? NIGHTCORE_INDICATOR : "";
 
 			if (!player.IsPaused)
 			{
 				if (player.RepeatMode == TrackRepeatMode.Track)
-					nowPlayingEmbed.WithTitle(TITLE + " 🔂").WithColor(DiscordColor.SpringGreen);
+					nowPlayingEmbed.WithTitle(TITLE + ncIndicator + " 🔂").WithColor(nightcoreEnabled ? NIGHTCORE_PLAYING_COLOR : DiscordColor.SpringGreen);
 				else
-					nowPlayingEmbed.WithTitle(TITLE).WithColor(DiscordColor.CornflowerBlue);
+					nowPlayingEmbed.WithTitle(TITLE + ncIndicator).WithColor(nightcoreEnabled ? NIGHTCORE_PLAYING_COLOR : DiscordColor.CornflowerBlue);
 			}
 			else
 			{
 				if (player.RepeatMode == TrackRepeatMode.Track)
-					nowPlayingEmbed.WithTitle(TITLE + " ⏸️🔂").WithColor(DiscordColor.Gray);
+					nowPlayingEmbed.WithTitle(TITLE + ncIndicator + " ⏸️🔂").WithColor(DiscordColor.Gray);
 				else
-					nowPlayingEmbed.WithTitle(TITLE + " ⏸️").WithColor(DiscordColor.Gray);
+					nowPlayingEmbed.WithTitle(TITLE + ncIndicator + " ⏸️").WithColor(DiscordColor.Gray);
 			}
 		}
 		else  // Nothing is in queue
 		{
+			string ncIndicator = nightcoreEnabled ? NIGHTCORE_INDICATOR : "";
+			string defaultImage = nightcoreEnabled ? NIGHTCORE_DEFAULT_IMAGE : "https://c.tenor.com/CZd0MAcCnNcAAAAC/among-us-amogus.gif";
+			var idleColor = nightcoreEnabled ? NIGHTCORE_IDLE_COLOR : DiscordColor.Red;
+
 			nowPlayingEmbed.AddField("Nothing is playing.", "The queue is empty.")
-				.WithFooter("Made by Mocretion")
-				.WithImageUrl("https://c.tenor.com/CZd0MAcCnNcAAAAC/among-us-amogus.gif")
-				.WithColor(DiscordColor.Red)
+				.WithAuthor("SusBot")
+				.WithFooter("Made by Mocretion. !help for commands")
+				.WithImageUrl(defaultImage)
+				.WithTitle(TITLE + ncIndicator)
+				.WithColor(idleColor)
 				.WithUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
 		}
 		DiscordEmbed embed = nowPlayingEmbed.Build();

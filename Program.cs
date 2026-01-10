@@ -411,22 +411,42 @@ file sealed class ApplicationHost : BackgroundService
 
     private async Task HandleCommandAsync(DiscordMember sender, ulong guildId, DiscordChannel channel, string command)
     {
+        string[] cmd = command.ToLower().Split(separator: [' '], count: 2);
+        string mainCommand = cmd[0];
+        string parameters = cmd.Length > 1 ? cmd[1] : "";
+
+        // Handle commands that don't require a player
+        if (!CommandHandler.RequiresPlayer(mainCommand))
+        {
+            // If user is in voice and player exists, use the player-aware version
+            if (sender.VoiceState?.Channel != null)
+            {
+                var player = await GetPlayerAsync(guildId, sender.VoiceState.Channel.Id, false);
+                if (player != null)
+                {
+                    await CommandHandler.HandleCommandAsync(mainCommand, parameters, player, channel, _jsonManager, sender);
+                    return;
+                }
+            }
+
+            // Otherwise use the playerless version
+            await CommandHandler.HandleCommandWithoutPlayerAsync(mainCommand, guildId, channel, _jsonManager, sender);
+            return;
+        }
+
+        // Commands that require player
         if (sender.VoiceState?.Channel == null)
         {
             return;
         }
 
-        string[] cmd = command.ToLower().Split(separator: [' '], count: 2);
-        string mainCommand = cmd[0];
-        string parameters = cmd.Length > 1 ? cmd[1] : "";
-
-        var player = await GetPlayerAsync(guildId, sender.VoiceState.Channel.Id, false);
-        if (player == null)
+        var playerForCommand = await GetPlayerAsync(guildId, sender.VoiceState.Channel.Id, false);
+        if (playerForCommand == null)
         {
             return;
         }
 
-        await CommandHandler.HandleCommandAsync(mainCommand, parameters, player, channel, _jsonManager);
+        await CommandHandler.HandleCommandAsync(mainCommand, parameters, playerForCommand, channel, _jsonManager, sender);
     }
 
     private async Task OnButtonReactionAsync(DiscordClient clientSender, ComponentInteractionCreateEventArgs args)
@@ -509,6 +529,18 @@ file sealed class ApplicationHost : BackgroundService
             {
                 _logger.LogWarning("Failed to get player for guild {GuildId}: {Status}", guildId, result.Status);
                 return null;
+            }
+
+            // Apply nightcore filters if enabled for this server
+            var serverInfo = _jsonManager.GetServer(guildId);
+            if (serverInfo?.NightcoreEnabled == true)
+            {
+                result.Player.Filters.Timescale = new Lavalink4NET.Filters.TimescaleFilterOptions(
+                    Speed: 1.25f,
+                    Pitch: 1.25f,
+                    Rate: 1.0f
+                );
+                await result.Player.Filters.CommitAsync();
             }
 
             return result.Player;
